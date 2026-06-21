@@ -8,7 +8,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-deltex = { path = "../deltex" }  # or from crates.io when published
+deltex = "1.3"
 ```
 
 ## Quick Start
@@ -133,7 +133,7 @@ let rows = db.query("SELECT * FROM users", &[])?;
 
 Enable with:
 ```toml
-deltex = { path = "...", features = ["blocking"] }
+deltex = { version = "1.3", features = ["blocking"] }
 ```
 
 ## Rows and Values
@@ -180,25 +180,22 @@ MIT
 ### Error handling
 
 ```rust
-use deltex::{DeltexClient, Error};
+use deltex::Error;
 
-let result = client.query("SELECT * FROM users WHERE id = $1", &[&42]).await;
-match result {
-    Ok(rows) => println!("{} rows", rows.len()),
-    Err(Error::RateLimit { retry_after }) => {
-        tokio::time::sleep(Duration::from_secs(retry_after)).await;
-        // retry...
-    }
-    Err(e) => return Err(e.into()),
+match client.query_one("SELECT * FROM users WHERE id = $1", &[&42i64]).await {
+    Ok(row) => println!("found: {:?}", row),
+    Err(Error::NoRows) => println!("no such user"),
+    Err(Error::Database(msg)) => eprintln!("engine error: {msg}"),
+    Err(e) => return Err(e),
 }
 ```
 
 ### Transactions
 
 ```rust
-let result = client.transaction(|tx| async move {
-    tx.execute("UPDATE accounts SET balance = balance - $1 WHERE id = $2", &[&100, &1]).await?;
-    tx.execute("UPDATE accounts SET balance = balance + $1 WHERE id = $2", &[&100, &2]).await?;
+client.transaction(|tx| async move {
+    tx.execute("UPDATE accounts SET balance = balance - $1 WHERE id = $2", &[&100i64, &1i64]).await?;
+    tx.execute("UPDATE accounts SET balance = balance + $1 WHERE id = $2", &[&100i64, &2i64]).await?;
     Ok(())
 }).await?;
 ```
@@ -218,10 +215,10 @@ let rows = client.strong()
 struct User { id: i64, name: String, score: f64 }
 
 let users: Vec<User> = client
-    .query_as("SELECT id, name, score FROM users LIMIT 10")
+    .query_as("SELECT id, name, score FROM users LIMIT 10", &[])
     .await?;
 ```
 
 ## SDK Version
 
-`v1.3.0` — see [CHANGELOG.md](../../CHANGELOG.md) for history.
+`v1.3.1` — see [CHANGELOG.md](../../CHANGELOG.md) for history.

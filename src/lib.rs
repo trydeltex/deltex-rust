@@ -8,7 +8,7 @@ use std::fmt;
 pub use serde_json::Value;
 
 /// Current SDK version.
-pub const VERSION: &str = "1.3.0";
+pub const VERSION: &str = "1.3.1";
 
 mod tests;
 
@@ -119,6 +119,7 @@ fn bind_params(sql: &str, params: &[&dyn Bind]) -> String {
 struct QueryResponse {
     success: bool,
     message: Option<String>,
+    #[allow(dead_code)]
     columns: Option<Vec<String>>,
     rows: Option<Vec<Row>>,
     affected_rows: Option<usize>,
@@ -133,6 +134,7 @@ pub struct Client {
     http: reqwest::Client,
     query_url: String,
     txn_url: String,
+    strong: bool,
 }
 
 impl fmt::Debug for Client {
@@ -153,7 +155,7 @@ impl Client {
             .map_err(Error::Http)?;
         let query_url = format!("{}/v1/query", opts.base_url);
         let txn_url = format!("{}/v1/transaction", opts.base_url);
-        Ok(Self { opts, http, query_url, txn_url })
+        Ok(Self { opts, http, query_url, txn_url, strong: false })
     }
 
     /// Create a client from environment variables (`DELTEX_API_KEY`, `DELTEX_URL`).
@@ -163,14 +165,15 @@ impl Client {
 
     async fn run_query(&self, sql: &str) -> Result<QueryResponse> {
         let body = serde_json::json!({ "sql": sql });
-        let resp = self.http
+        let mut req = self.http
             .post(&self.query_url)
             .header("Authorization", format!("Bearer {}", self.opts.api_key))
             .header("Content-Type", "application/json")
-            .header("X-Write-Mode", &self.opts.write_mode)
-            .json(&body)
-            .send()
-            .await?;
+            .header("X-Write-Mode", &self.opts.write_mode);
+        if self.strong {
+            req = req.header("X-Consistency", "strong");
+        }
+        let resp = req.json(&body).send().await?;
         let qr: QueryResponse = resp.json().await?;
         if !qr.success {
             return Err(Error::Database(qr.message.unwrap_or_else(|| "Unknown error".to_string())));
@@ -221,8 +224,11 @@ impl Client {
 
     /// Run multiple statements in a transaction.
     ///
-    /// The closure receives a `Transaction` object. If the closure returns `Err`,
-    /// the transaction is rolled back. Otherwise it commits.
+    /// The closure receives a [`Transaction`]. Statements issued on it are
+    /// collected and committed atomically in a single round-trip when the
+    /// closure returns `Ok`. If the closure returns `Err`, no statements are
+    /// sent (the transaction is rolled back). Reads should be issued on the
+    /// client directly, not the transaction handle.
     ///
     /// ```no_run
     /// # async fn run(db: &deltex::Client) -> deltex::Result<()> {
@@ -238,12 +244,14 @@ impl Client {
         F: FnOnce(Transaction) -> Fut,
         Fut: std::future::Future<Output = Result<()>>,
     {
-        let tx = Transaction { stmts: Vec::new() };
-        let tx = std::cell::RefCell::new(tx);
-        let tx_ref = unsafe { &mut *tx.as_ptr() };
-        f(Transaction { stmts: Vec::new() }).await?;
-        // Collect statements and send to /v1/transaction
-        let _ = tx_ref;
+        let stmts = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let tx = Transaction { stmts: stmts.clone() };
+        f(tx).await?;
+        let collected = std::mem::take(&mut *stmts.lock().unwrap());
+        if collected.is_empty() {
+            return Ok(());
+        }
+        self.commit(TxnBuilder { stmts: collected }).await?;
         Ok(())
     }
 
@@ -287,10 +295,35 @@ impl Client {
         Ok(results)
     }
 
-    /// Return a strong-consistency client (forces KV reads, skips cache).
+    /// Execute a query and deserialize each row into `T`.
+    ///
+    /// ```no_run
+    /// # async fn run(db: &deltex::Client) -> deltex::Result<()> {
+    /// #[derive(serde::Deserialize)]
+    /// struct User { id: i64, name: String }
+    /// let users: Vec<User> = db.query_as("SELECT id, name FROM users", &[]).await?;
+    /// # Ok(()) }
+    /// ```
+    pub async fn query_as<T: serde::de::DeserializeOwned>(
+        &self,
+        sql: &str,
+        params: &[&dyn Bind],
+    ) -> Result<Vec<T>> {
+        let rows = self.query(sql, params).await?;
+        rows.into_iter()
+            .map(|row| {
+                serde_json::to_value(row)
+                    .and_then(serde_json::from_value)
+                    .map_err(Error::Serialize)
+            })
+            .collect()
+    }
+
+    /// Return a client whose reads use strong consistency (`X-Consistency: strong`),
+    /// bypassing the read cache.
     pub fn strong(&self) -> Self {
         let mut c = self.clone();
-        c.opts.write_mode = "sync".to_string();
+        c.strong = true;
         c
     }
 
@@ -304,14 +337,26 @@ impl Client {
 
 // ===== Transaction =====
 
-/// Transaction handle passed to closures in `Client::transaction()`.
+/// Transaction handle passed to the closure in [`Client::transaction`].
+///
+/// Mutating statements are collected as they are issued and sent to the engine
+/// atomically once the closure returns `Ok`. If the closure returns `Err`,
+/// nothing is sent.
 pub struct Transaction {
-    stmts: Vec<String>,
+    stmts: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
 }
 
 impl Transaction {
-    pub async fn execute(&self, _sql: &str, _params: &[&dyn Bind]) -> Result<usize> {
-        Ok(0) // Placeholder; real impl uses TxnBuilder
+    /// Add a parameterized statement to the transaction.
+    pub async fn execute(&self, sql: &str, params: &[&dyn Bind]) -> Result<usize> {
+        self.stmts.lock().unwrap().push(bind_params(sql, params));
+        Ok(0)
+    }
+
+    /// Add a raw statement (no parameter binding) to the transaction.
+    pub async fn execute_raw(&self, sql: &str) -> Result<usize> {
+        self.stmts.lock().unwrap().push(sql.to_string());
+        Ok(0)
     }
 }
 

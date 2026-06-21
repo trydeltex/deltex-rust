@@ -174,4 +174,19 @@ mod tests {
            .add_raw("SELECT 42");
         assert_eq!(txn.stmts.len(), 3);
     }
+
+    // ── Transaction handle (regression: must COLLECT, not silently drop) ───────
+
+    #[tokio::test]
+    async fn test_transaction_handle_collects_statements() {
+        use std::sync::{Arc, Mutex};
+        let stmts = Arc::new(Mutex::new(Vec::<String>::new()));
+        let tx = Transaction { stmts: stmts.clone() };
+        tx.execute("INSERT INTO t (id) VALUES ($1)", &[&1i64]).await.unwrap();
+        tx.execute_raw("UPDATE t SET x = 1").await.unwrap();
+        let collected = stmts.lock().unwrap();
+        assert_eq!(collected.len(), 2, "transaction handle must collect issued statements");
+        assert_eq!(collected[0], "INSERT INTO t (id) VALUES (1)");
+        assert_eq!(collected[1], "UPDATE t SET x = 1");
+    }
 }

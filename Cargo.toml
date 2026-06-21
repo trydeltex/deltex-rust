@@ -1,10 +1,10 @@
 [package]
 name = "deltex"
-version = "1.3.0"
+version = "1.3.1"
 edition = "2021"
 description = "Official Rust client for Deltex — edge-native SQL database"
 license = "MIT"
-repository = "https://github.com/imperialorg/edgedb"
+repository = "https://github.com/trydeltex/deltex-rust"
 keywords = ["database", "sql", "edge", "deltex"]
 categories = ["database"]
 
