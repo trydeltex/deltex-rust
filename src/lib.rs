@@ -8,7 +8,7 @@ use std::fmt;
 pub use serde_json::Value;
 
 /// Current SDK version.
-pub const VERSION: &str = "1.3.1";
+pub const VERSION: &str = "1.3.2";
 
 mod tests;
 
